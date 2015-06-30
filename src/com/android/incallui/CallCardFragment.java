@@ -22,16 +22,27 @@ import android.animation.AnimatorSet;
 import android.animation.LayoutTransition;
 import android.animation.ObjectAnimator;
 import android.app.Activity;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.ContentResolver;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.res.Configuration;
 import android.graphics.Point;
+import android.graphics.drawable.AnimationDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Message;
 import android.telecom.DisconnectCause;
+import android.telecom.TelecomManager;
 import android.telecom.VideoProfile;
 import android.telephony.PhoneNumberUtils;
+import android.text.format.DateUtils;
 import android.text.TextUtils;
+import android.text.format.DateUtils;
 import android.view.Display;
+import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.View.OnLayoutChangeListener;
@@ -46,8 +57,11 @@ import android.view.animation.AnimationUtils;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import com.android.contacts.common.util.MaterialColorMapUtils.MaterialPalette;
 import com.android.contacts.common.widget.FloatingActionButtonController;
+import com.android.incallui.service.PhoneNumberService;
 import com.android.phone.common.animation.AnimUtils;
 
 import java.util.List;
@@ -78,19 +92,22 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
     private View mCallNumberAndLabel;
     private ImageView mPhoto;
     private TextView mElapsedTime;
+    private Drawable mPrimaryPhotoDrawable;
 
     // Container view that houses the entire primary call card, including the call buttons
     private View mPrimaryCallCardContainer;
     // Container view that houses the primary call information
     private ViewGroup mPrimaryCallInfo;
     private View mCallButtonsContainer;
+    private ImageButton mVBButton;
+    private TextView mRecordingTimeLabel;
+    private TextView mRecordingIcon;
 
     // Secondary caller info
     private View mSecondaryCallInfo;
     private TextView mSecondaryCallName;
     private View mSecondaryCallProviderInfo;
     private TextView mSecondaryCallProviderLabel;
-    private ImageView mSecondaryCallProviderIcon;
     private View mSecondaryCallConferenceCallIcon;
     private View mProgressSpinner;
 
@@ -113,6 +130,17 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
     private int mVideoAnimationDuration;
 
     private static final int DEFAULT_VIEW_OFFSET_Y = 0;
+
+    private String mRecordingTime;
+
+    private static final String RECORD_STATE_CHANGED =
+            "com.qualcomm.qti.phonefeature.RECORD_STATE_CHANGED";
+
+    private static final int MESSAGE_TIMER = 1;
+
+    private InCallActivity mInCallActivity;
+
+    private MaterialPalette mCurrentThemeColors;
 
     @Override
     CallCardPresenter.CallCardUi getUi() {
@@ -137,6 +165,16 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
                 R.dimen.end_call_floating_action_button_diameter);
         mFabSmallDiameter = getResources().getDimensionPixelOffset(
                 R.dimen.end_call_floating_action_button_small_diameter);
+
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(RECORD_STATE_CHANGED);
+        getActivity().registerReceiver(recorderStateReceiver, filter);
+
+        mInCallActivity = (InCallActivity)getActivity();
+
+        if (mInCallActivity.isCallRecording()) {
+            recorderHandler.sendEmptyMessage(MESSAGE_TIMER);
+        }
     }
 
 
@@ -220,12 +258,25 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
             @Override
             public void onClick(View v) {
                 InCallActivity activity = (InCallActivity) getActivity();
-                activity.showConferenceCallManager();
+                activity.showConferenceCallManager(true);
             }
         });
 
         mPrimaryName.setElegantTextHeight(false);
         mCallStateLabel.setElegantTextHeight(false);
+
+        mVBButton = (ImageButton) view.findViewById(R.id.volumeBoost);
+        if (mVBButton != null) {
+            mVBButton.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    getPresenter().volumeBoostClicked();
+                }
+            });
+        }
+
+        mRecordingTimeLabel = (TextView) view.findViewById(R.id.recordingTime);
+        mRecordingIcon = (TextView) view.findViewById(R.id.recordingIcon);
     }
 
     @Override
@@ -245,6 +296,19 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
     @Override
     public void setProgressSpinnerVisible(boolean visible) {
         mProgressSpinner.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
+    @Override
+    public void setVolumeBoostButtonState(boolean visible, boolean on) {
+        if (mVBButton == null) {
+            return;
+        }
+        if (visible) {
+            mVBButton.setVisibility(View.VISIBLE);
+            mVBButton.setBackgroundResource(on ? R.drawable.vb_active : R.drawable.vb_normal);
+        } else {
+            mVBButton.setVisibility(View.GONE);
+        }
     }
 
     /**
@@ -373,7 +437,9 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
         if (TextUtils.isEmpty(name)) {
             mPrimaryName.setText(null);
         } else {
-            mPrimaryName.setText(name);
+            mPrimaryName.setText(nameIsNumber
+                    ? PhoneNumberUtils.ttsSpanAsPhoneNumber(name)
+                    : name);
 
             // Set direction of the name field
             int nameDirection = View.TEXT_DIRECTION_INHERIT;
@@ -398,7 +464,7 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
             mPhoneNumber.setText(null);
             mPhoneNumber.setVisibility(View.GONE);
         } else {
-            mPhoneNumber.setText(number);
+            mPhoneNumber.setText(PhoneNumberUtils.ttsSpanAsPhoneNumber(number));
             mPhoneNumber.setVisibility(View.VISIBLE);
             mPhoneNumber.setTextDirection(View.TEXT_DIRECTION_LTR);
         }
@@ -417,7 +483,7 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
 
     @Override
     public void setPrimary(String number, String name, boolean nameIsNumber, String label,
-            Drawable photo, boolean isSipCall) {
+            Drawable photo, boolean isSipCall, boolean isForwarded) {
         Log.d(this, "Setting primary call");
 
         // set the name field.
@@ -425,8 +491,10 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
 
         if (TextUtils.isEmpty(number) && TextUtils.isEmpty(label)) {
             mCallNumberAndLabel.setVisibility(View.GONE);
+            mElapsedTime.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_START);
         } else {
             mCallNumberAndLabel.setVisibility(View.VISIBLE);
+            mElapsedTime.setTextAlignment(View.TEXT_ALIGNMENT_VIEW_END);
         }
 
         setPrimaryPhoneNumber(number);
@@ -434,14 +502,14 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
         // Set the label (Mobile, Work, etc)
         setPrimaryLabel(label);
 
-        showInternetCallLabel(isSipCall);
+        showCallTypeLabel(isSipCall, isForwarded);
 
         setDrawableToImageView(mPhoto, photo);
     }
 
     @Override
     public void setSecondary(boolean show, String name, boolean nameIsNumber, String label,
-            String providerLabel, Drawable providerIcon, boolean isConference) {
+            String providerLabel, boolean isConference) {
 
         if (show != mSecondaryCallInfo.isShown()) {
             updateFabPositionForSecondaryCallInfo();
@@ -453,10 +521,11 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
 
             mSecondaryCallConferenceCallIcon.setVisibility(isConference ? View.VISIBLE : View.GONE);
 
-            mSecondaryCallName.setText(name);
+            mSecondaryCallName.setText(nameIsNumber
+                    ? PhoneNumberUtils.ttsSpanAsPhoneNumber(name)
+                    : name);
             if (hasProvider) {
                 mSecondaryCallProviderLabel.setText(providerLabel);
-                mSecondaryCallProviderIcon.setImageDrawable(providerIcon);
             }
 
             int nameDirection = View.TEXT_DIRECTION_INHERIT;
@@ -477,10 +546,12 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
             DisconnectCause disconnectCause,
             String connectionLabel,
             Drawable callStateIcon,
-            String gatewayNumber) {
+            String gatewayNumber,
+            boolean isWaitingForRemoteSide) {
         boolean isGatewayCall = !TextUtils.isEmpty(gatewayNumber);
         CharSequence callStateLabel = getCallStateLabelFromState(state, videoState,
-                sessionModificationState, disconnectCause, connectionLabel, isGatewayCall);
+                sessionModificationState, disconnectCause, connectionLabel,
+                isGatewayCall, isWaitingForRemoteSide);
 
         Log.v(this, "setCallState " + callStateLabel);
         Log.v(this, "DisconnectCause " + disconnectCause.toString());
@@ -503,7 +574,6 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
                 mCallStateLabel.startAnimation(mPulseAnimation);
             }
         } else {
-            mCallStateLabel.clearAnimation();
             Animation callStateLabelAnimation = mCallStateLabel.getAnimation();
             if (callStateLabelAnimation != null) {
                 callStateLabelAnimation.cancel();
@@ -526,6 +596,10 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
             } else {
                 mCallStateIcon.startAnimation(mPulseAnimation);
             }
+
+            if (callStateIcon instanceof AnimationDrawable) {
+                ((AnimationDrawable) callStateIcon).start();
+            }
         } else {
             Animation callStateIconAnimation = mCallStateIcon.getAnimation();
             if (callStateIconAnimation != null) {
@@ -544,6 +618,15 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
             mCallStateVideoCallIcon.setVisibility(View.VISIBLE);
         } else {
             mCallStateVideoCallIcon.setVisibility(View.GONE);
+        }
+
+        if (state == Call.State.INCOMING) {
+            if (callStateLabel != null) {
+                getView().announceForAccessibility(callStateLabel);
+            }
+            if (mPrimaryName.getText() != null) {
+                getView().announceForAccessibility(mPrimaryName.getText());
+            }
         }
     }
 
@@ -570,24 +653,28 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
         mInCallMessageLabel.setVisibility(View.VISIBLE);
     }
 
-    private void showInternetCallLabel(boolean show) {
-        if (show) {
-            final String label = getView().getContext().getString(
-                    R.string.incall_call_type_label_sip);
+    private void showCallTypeLabel(boolean isSipCall, boolean isForwarded) {
+        if (isSipCall) {
             mCallTypeLabel.setVisibility(View.VISIBLE);
-            mCallTypeLabel.setText(label);
+            mCallTypeLabel.setText(R.string.incall_call_type_label_sip);
+        } else if (isForwarded) {
+            mCallTypeLabel.setVisibility(View.VISIBLE);
+            mCallTypeLabel.setText(R.string.incall_call_type_label_forwarded);
         } else {
             mCallTypeLabel.setVisibility(View.GONE);
         }
     }
 
     @Override
-    public void setPrimaryCallElapsedTime(boolean show, String callTimeElapsed) {
+    public void setPrimaryCallElapsedTime(boolean show, long duration) {
         if (show) {
             if (mElapsedTime.getVisibility() != View.VISIBLE) {
                 AnimUtils.fadeIn(mElapsedTime, AnimUtils.DEFAULT_DURATION);
             }
+            String callTimeElapsed = DateUtils.formatElapsedTime(duration / 1000);
+            String durationDescription = InCallDateUtils.formatDetailedDuration(duration);
             mElapsedTime.setText(callTimeElapsed);
+            mElapsedTime.setContentDescription(durationDescription);
         } else {
             // hide() animation has no effect if it is already hidden.
             AnimUtils.fadeOut(mElapsedTime, AnimUtils.DEFAULT_DURATION);
@@ -596,16 +683,24 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
 
     private void setDrawableToImageView(ImageView view, Drawable photo) {
         if (photo == null) {
-            photo = view.getResources().getDrawable(R.drawable.img_no_image);
-            photo.setAutoMirrored(true);
+            photo = ContactInfoCache.getInstance(
+                    view.getContext()).getDefaultContactPhotoDrawable();
         }
+
+        if (mPrimaryPhotoDrawable == photo) {
+            return;
+        }
+        mPrimaryPhotoDrawable = photo;
 
         final Drawable current = view.getDrawable();
         if (current == null) {
             view.setImageDrawable(photo);
             AnimUtils.fadeIn(mElapsedTime, AnimUtils.DEFAULT_DURATION);
         } else {
-            InCallAnimationUtils.startCrossFade(view, current, photo);
+            // Cross fading is buggy and not noticable due to the multiple calls to this method
+            // that switch drawables in the middle of the cross-fade animations. Just set the
+            // photo directly instead.
+            view.setImageDrawable(photo);
             view.setVisibility(View.VISIBLE);
         }
     }
@@ -621,7 +716,7 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
      */
     private CharSequence getCallStateLabelFromState(int state, int videoState,
             int sessionModificationState, DisconnectCause disconnectCause, String label,
-            boolean isGatewayCall) {
+            boolean isGatewayCall, boolean isWaitingForRemoteSide) {
         final Context context = getView().getContext();
         CharSequence callStateLabel = null;  // Label to display as part of the call banner
 
@@ -648,6 +743,8 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
                     callStateLabel = context.getString(R.string.card_title_video_call_paused);
                 } else if (VideoProfile.VideoState.isBidirectional(videoState)) {
                     callStateLabel = context.getString(R.string.card_title_video_call);
+                } else if (isWaitingForRemoteSide) {
+                    callStateLabel = context.getString(R.string.card_title_waiting_call);
                 }
                 break;
             case Call.State.ONHOLD:
@@ -657,6 +754,8 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
             case Call.State.DIALING:
                 if (isSpecialCall) {
                     callStateLabel = context.getString(R.string.calling_via_template, label);
+                } else if (isWaitingForRemoteSide) {
+                    callStateLabel = context.getString(R.string.card_title_dialing_waiting);
                 } else {
                     callStateLabel = context.getString(R.string.card_title_dialing);
                 }
@@ -688,6 +787,12 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
                 if (TextUtils.isEmpty(callStateLabel)) {
                     callStateLabel = context.getString(R.string.card_title_call_ended);
                 }
+                if (context.getResources().getBoolean(R.bool.def_incallui_clearcode_enabled)) {
+                    String clearText = disconnectCause.getDescription() == null ? "" : disconnectCause.getDescription().toString();
+                    if (!TextUtils.isEmpty(clearText)) {
+                        Toast.makeText(context, clearText, Toast.LENGTH_SHORT).show();
+                    }
+                }
                 break;
             case Call.State.CONFERENCED:
                 callStateLabel = context.getString(R.string.card_title_conf_call);
@@ -707,13 +812,12 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
             mSecondaryCallName = (TextView) getView().findViewById(R.id.secondaryCallName);
             mSecondaryCallConferenceCallIcon =
                     getView().findViewById(R.id.secondaryCallConferenceCallIcon);
-            if (hasProvider) {
-                mSecondaryCallProviderInfo.setVisibility(View.VISIBLE);
-                mSecondaryCallProviderLabel = (TextView) getView()
-                        .findViewById(R.id.secondaryCallProviderLabel);
-                mSecondaryCallProviderIcon = (ImageView) getView()
-                        .findViewById(R.id.secondaryCallProviderIcon);
-            }
+        }
+
+        if (mSecondaryCallProviderLabel == null && hasProvider) {
+            mSecondaryCallProviderInfo.setVisibility(View.VISIBLE);
+            mSecondaryCallProviderLabel = (TextView) getView()
+                    .findViewById(R.id.secondaryCallProviderLabel);
         }
     }
 
@@ -787,6 +891,22 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
         return mManageConferenceCallButton.getVisibility() == View.VISIBLE;
     }
 
+    /**
+     * Get the overall InCallUI background colors and apply to call card.
+     */
+    public void updateColors() {
+        MaterialPalette themeColors = InCallPresenter.getInstance().getThemeColors();
+
+        if (mCurrentThemeColors != null && mCurrentThemeColors.equals(themeColors)) {
+            return;
+        }
+
+        mPrimaryCallCardContainer.setBackgroundColor(themeColors.mPrimaryColor);
+        mCallButtonsContainer.setBackgroundColor(themeColors.mPrimaryColor);
+
+        mCurrentThemeColors = themeColors;
+    }
+
     private void dispatchPopulateAccessibilityEvent(AccessibilityEvent event, View view) {
         if (view == null) return;
         final List<CharSequence> eventText = event.getText();
@@ -798,9 +918,9 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
         }
     }
 
-    public void animateForNewOutgoingCall(Point touchPoint) {
+    public void animateForNewOutgoingCall(final Point touchPoint,
+            final boolean showCircularReveal) {
         final ViewGroup parent = (ViewGroup) mPrimaryCallCardContainer.getParent();
-        final Point startPoint = touchPoint;
 
         final ViewTreeObserver observer = getView().getViewTreeObserver();
 
@@ -831,19 +951,16 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
                 mCallTypeLabel.setAlpha(0);
                 mCallNumberAndLabel.setAlpha(0);
 
-                final Animator revealAnimator = getRevealAnimator(startPoint);
-                final Animator shrinkAnimator =
-                        getShrinkAnimator(parent.getHeight(), originalHeight);
+                final Animator animator = getOutgoingCallAnimator(touchPoint,
+                        parent.getHeight(), originalHeight, showCircularReveal);
 
-                mAnimatorSet = new AnimatorSet();
-                mAnimatorSet.playSequentially(revealAnimator, shrinkAnimator);
-                mAnimatorSet.addListener(new AnimatorListenerAdapter() {
+                animator.addListener(new AnimatorListenerAdapter() {
                     @Override
                     public void onAnimationEnd(Animator animation) {
                         setViewStatePostAnimation(listener);
                     }
                 });
-                mAnimatorSet.start();
+                animator.start();
             }
         });
     }
@@ -899,6 +1016,8 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
                 updateFabPosition();
             }
         });
+
+        updateColors();
     }
 
     /**
@@ -985,6 +1104,21 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
         return valueAnimator;
     }
 
+    private Animator getOutgoingCallAnimator(Point touchPoint, int startHeight, int endHeight,
+            boolean showCircularReveal) {
+
+        final Animator shrinkAnimator = getShrinkAnimator(startHeight, endHeight);
+
+        if (!showCircularReveal) {
+            return shrinkAnimator;
+        }
+
+        final Animator revealAnimator = getRevealAnimator(touchPoint);
+        final AnimatorSet animatorSet = new AnimatorSet();
+        animatorSet.playSequentially(revealAnimator, shrinkAnimator);
+        return animatorSet;
+    }
+
     private void assignTranslateAnimation(View view, int offset) {
         view.setTranslationY(mTranslationOffset * offset);
         view.animate().translationY(0).alpha(1).withLayer()
@@ -1026,4 +1160,64 @@ public class CallCardFragment extends BaseFragment<CallCardPresenter, CallCardPr
             v.setBottom(oldBottom);
         }
     }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        getActivity().unregisterReceiver(recorderStateReceiver);
+    }
+
+    private void showCallRecordingElapsedTime() {
+        if (mRecordingTimeLabel.getVisibility() != View.VISIBLE) {
+            AnimUtils.fadeIn(mRecordingTimeLabel, AnimUtils.DEFAULT_DURATION);
+        }
+
+        mRecordingTimeLabel.setText(mRecordingTime);
+    }
+
+    private BroadcastReceiver recorderStateReceiver = new BroadcastReceiver() {
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!RECORD_STATE_CHANGED.equals(intent.getAction())) {
+                return;
+            }
+
+            if (mInCallActivity.isCallRecording()) {
+                recorderHandler.sendEmptyMessage(MESSAGE_TIMER);
+            } else {
+                mRecordingTimeLabel.setVisibility(View.GONE);
+                mRecordingIcon.setVisibility(View.GONE);
+            }
+        }
+    };
+
+    private Handler recorderHandler = new Handler() {
+
+        @Override
+        public void handleMessage(Message msg) {
+
+            switch (msg.what) {
+            case MESSAGE_TIMER:
+                if (!mInCallActivity.isCallRecording()) {
+                    break;
+                }
+
+                String recordingTime = mInCallActivity.getCallRecordingTime();
+
+                if (!TextUtils.isEmpty(recordingTime)) {
+                    mRecordingTime = recordingTime;
+                    mRecordingTimeLabel.setVisibility(View.VISIBLE);
+                    showCallRecordingElapsedTime();
+                    mRecordingIcon.setVisibility(View.VISIBLE);
+                }
+
+                if (!recorderHandler.hasMessages(MESSAGE_TIMER)) {
+                    sendEmptyMessageDelayed(MESSAGE_TIMER, 1000);
+                }
+
+                break;
+            }
+        }
+    };
 }

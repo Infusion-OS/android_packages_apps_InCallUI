@@ -40,8 +40,8 @@ import java.util.List;
     private Phone.Listener mPhoneListener = new Phone.Listener() {
         @Override
         public void onAudioStateChanged(Phone phone, AudioState audioState) {
-            onAudioModeChange(audioState.route, audioState.isMuted);
-            onSupportedAudioModeChange(audioState.supportedRouteMask);
+            onAudioModeChange(audioState.getRoute(), audioState.isMuted());
+            onSupportedAudioModeChange(audioState.getSupportedRouteMask());
         }
     };
 
@@ -64,6 +64,7 @@ import java.util.List;
     public void onAudioModeChange(int newMode, boolean muted) {
         if (mAudioMode != newMode) {
             mAudioMode = newMode;
+
             for (AudioModeListener l : mListeners) {
                 l.onAudioMode(mAudioMode);
             }

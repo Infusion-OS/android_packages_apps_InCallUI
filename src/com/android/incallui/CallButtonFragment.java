@@ -19,20 +19,25 @@ package com.android.incallui;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.res.ColorStateList;
 import android.content.res.Resources;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
+import android.os.Message;
 import android.telecom.AudioState;
 import android.telecom.TelecomManager;
 import android.telecom.VideoProfile;
 import android.view.ContextThemeWrapper;
+import android.view.HapticFeedbackConstants;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.accessibility.AccessibilityEvent;
-import android.view.accessibility.AccessibilityManager;
 import android.widget.CompoundButton;
 import android.widget.ImageButton;
 import android.widget.PopupMenu;
@@ -42,33 +47,38 @@ import android.widget.PopupMenu.OnMenuItemClickListener;
 
 import java.util.ArrayList;
 
+import com.android.contacts.common.util.MaterialColorMapUtils;
+import com.android.contacts.common.util.MaterialColorMapUtils.MaterialPalette;
+
 /**
  * Fragment for call control buttons
  */
 public class CallButtonFragment
         extends BaseFragment<CallButtonPresenter, CallButtonPresenter.CallButtonUi>
         implements CallButtonPresenter.CallButtonUi, OnMenuItemClickListener, OnDismissListener,
-        View.OnClickListener, CompoundButton.OnCheckedChangeListener {
+        View.OnClickListener {
 
     private static final int INVALID_INDEX = -1;
-    private ImageButton mAudioButton;
+    private CompoundButton mAudioButton;
     private ImageButton mChangeToVoiceButton;
-    private ImageButton mMuteButton;
-    private ImageButton mShowDialpadButton;
-    private ImageButton mHoldButton;
+    private CompoundButton mMuteButton;
+    private CompoundButton mShowDialpadButton;
+    private CompoundButton mHoldButton;
     private ImageButton mSwapButton;
     private ImageButton mChangeToVideoButton;
-    private ImageButton mSwitchCameraButton;
+    private CompoundButton mSwitchCameraButton;
     private ImageButton mAddCallButton;
     private ImageButton mMergeButton;
-    private ImageButton mPauseVideoButton;
+    private CompoundButton mPauseVideoButton;
     private ImageButton mOverflowButton;
     private ImageButton mAddParticipantButton;
     private ImageButton mManageVideoCallConferenceButton;
+    private ImageButton mMoreMenuButton;
 
     private PopupMenu mAudioModePopup;
     private boolean mAudioModePopupVisible;
     private PopupMenu mOverflowPopup;
+    private PopupMenu mMoreMenu;
 
     private int mPrevAudioMode = 0;
 
@@ -77,6 +87,7 @@ public class CallButtonFragment
     private static final int VISIBLE = 255;
 
     private boolean mIsEnabled;
+    private MaterialPalette mCurrentThemeColors;
 
     @Override
     CallButtonPresenter createPresenter() {
@@ -99,27 +110,27 @@ public class CallButtonFragment
             Bundle savedInstanceState) {
         final View parent = inflater.inflate(R.layout.call_button_fragment, container, false);
 
-        mAudioButton = (ImageButton) parent.findViewById(R.id.audioButton);
+        mAudioButton = (CompoundButton) parent.findViewById(R.id.audioButton);
         mAudioButton.setOnClickListener(this);
         mChangeToVoiceButton = (ImageButton) parent.findViewById(R.id.changeToVoiceButton);
         mChangeToVoiceButton. setOnClickListener(this);
-        mMuteButton = (ImageButton) parent.findViewById(R.id.muteButton);
+        mMuteButton = (CompoundButton) parent.findViewById(R.id.muteButton);
         mMuteButton.setOnClickListener(this);
-        mShowDialpadButton = (ImageButton) parent.findViewById(R.id.dialpadButton);
+        mShowDialpadButton = (CompoundButton) parent.findViewById(R.id.dialpadButton);
         mShowDialpadButton.setOnClickListener(this);
-        mHoldButton = (ImageButton) parent.findViewById(R.id.holdButton);
+        mHoldButton = (CompoundButton) parent.findViewById(R.id.holdButton);
         mHoldButton.setOnClickListener(this);
         mSwapButton = (ImageButton) parent.findViewById(R.id.swapButton);
         mSwapButton.setOnClickListener(this);
         mChangeToVideoButton = (ImageButton) parent.findViewById(R.id.changeToVideoButton);
         mChangeToVideoButton.setOnClickListener(this);
-        mSwitchCameraButton = (ImageButton) parent.findViewById(R.id.switchCameraButton);
+        mSwitchCameraButton = (CompoundButton) parent.findViewById(R.id.switchCameraButton);
         mSwitchCameraButton.setOnClickListener(this);
         mAddCallButton = (ImageButton) parent.findViewById(R.id.addButton);
         mAddCallButton.setOnClickListener(this);
         mMergeButton = (ImageButton) parent.findViewById(R.id.mergeButton);
         mMergeButton.setOnClickListener(this);
-        mPauseVideoButton = (ImageButton) parent.findViewById(R.id.pauseVideoButton);
+        mPauseVideoButton = (CompoundButton) parent.findViewById(R.id.pauseVideoButton);
         mPauseVideoButton.setOnClickListener(this);
         mAddParticipantButton = (ImageButton) parent.findViewById(R.id.addParticipant);
         mAddParticipantButton.setOnClickListener(this);
@@ -128,6 +139,23 @@ public class CallButtonFragment
         mManageVideoCallConferenceButton = (ImageButton) parent.findViewById(
             R.id.manageVideoCallConferenceButton);
         mManageVideoCallConferenceButton.setOnClickListener(this);
+
+        mMoreMenuButton = (ImageButton) parent.findViewById(R.id.moreMenuButton);
+        if (mMoreMenuButton != null) {
+            boolean canRecordCalls = ((InCallActivity)getActivity()).isCallRecorderEnabled();
+            if (canRecordCalls) {
+                mMoreMenuButton.setOnClickListener(this);
+                mMoreMenu = new MorePopupMenu(parent.getContext(), mMoreMenuButton);
+
+                mMoreMenu.inflate(R.menu.incall_more_menu);
+                mMoreMenu.setOnMenuItemClickListener(this);
+
+                mMoreMenuButton.setOnTouchListener(mMoreMenu.getDragToOpenListener());
+            } else {
+                mMoreMenuButton.setVisibility(View.GONE);
+            }
+        }
+
         return parent;
     }
 
@@ -145,10 +173,8 @@ public class CallButtonFragment
             getPresenter().refreshMuteState();
         }
         super.onResume();
-    }
 
-    @Override
-    public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+        updateColors();
     }
 
     @Override
@@ -156,6 +182,7 @@ public class CallButtonFragment
         int id = view.getId();
         Log.d(this, "onClick(View " + view + ", id " + id + ")...");
 
+        boolean isClickHandled = true;
         switch(id) {
             case R.id.audioButton:
                 onAudioButtonClicked();
@@ -167,8 +194,7 @@ public class CallButtonFragment
                 getPresenter().displayModifyCallOptions();
                 break;
             case R.id.muteButton: {
-                final ImageButton button = (ImageButton) view;
-                getPresenter().muteClicked(!button.isSelected());
+                getPresenter().muteClicked(!mMuteButton.isSelected());
                 break;
             }
             case R.id.mergeButton:
@@ -176,8 +202,7 @@ public class CallButtonFragment
                 mMergeButton.setEnabled(false);
                 break;
             case R.id.holdButton: {
-                final ImageButton button = (ImageButton) view;
-                getPresenter().holdClicked(!button.isSelected());
+                getPresenter().holdClicked(!mHoldButton.isSelected());
                 break;
             }
             case R.id.swapButton:
@@ -206,10 +231,126 @@ public class CallButtonFragment
             case R.id.manageVideoCallConferenceButton:
                 onManageVideoCallConferenceClicked();
                 break;
+            case R.id.moreMenuButton:
+                mMoreMenu.show();
+                break;
             default:
+                isClickHandled = false;
                 Log.wtf(this, "onClick: unexpected");
                 break;
         }
+
+        if (isClickHandled) {
+            view.performHapticFeedback(
+                    HapticFeedbackConstants.VIRTUAL_KEY,
+                    HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
+        }
+    }
+
+    public void updateColors() {
+        MaterialPalette themeColors = InCallPresenter.getInstance().getThemeColors();
+
+        if (mCurrentThemeColors != null && mCurrentThemeColors.equals(themeColors)) {
+            return;
+        }
+
+        Resources res = getActivity().getResources();
+        View[] compoundButtons = {
+                mAudioButton,
+                mMuteButton,
+                mShowDialpadButton,
+                mHoldButton,
+                mSwitchCameraButton,
+                mPauseVideoButton
+        };
+
+        for (View button : compoundButtons) {
+            final LayerDrawable layers = (LayerDrawable) button.getBackground();
+            final RippleDrawable btnCompoundDrawable = compoundBackgroundDrawable(themeColors);
+            layers.setDrawableByLayerId(R.id.compoundBackgroundItem, btnCompoundDrawable);
+        }
+
+        ImageButton[] normalButtons = {
+            mChangeToVoiceButton,
+            mSwapButton,
+            mChangeToVideoButton,
+            mAddCallButton,
+            mMergeButton,
+            mOverflowButton
+        };
+
+        for (ImageButton button : normalButtons) {
+            final LayerDrawable layers = (LayerDrawable) button.getBackground();
+            final RippleDrawable btnDrawable = backgroundDrawable(themeColors);
+            layers.setDrawableByLayerId(R.id.backgroundItem, btnDrawable);
+        }
+
+        mCurrentThemeColors = themeColors;
+    }
+
+    /**
+     * Generate a RippleDrawable which will be the background for a compound button, i.e.
+     * a button with pressed and unpressed states. The unpressed state will be the same color
+     * as the rest of the call card, the pressed state will be the dark version of that color.
+     */
+    private RippleDrawable compoundBackgroundDrawable(MaterialPalette palette) {
+        Resources res = getResources();
+        ColorStateList rippleColor =
+                ColorStateList.valueOf(res.getColor(R.color.incall_accent_color));
+
+        StateListDrawable stateListDrawable = new StateListDrawable();
+        addSelectedAndFocused(res, stateListDrawable);
+        addFocused(res, stateListDrawable);
+        addSelected(res, stateListDrawable, palette);
+        addUnselected(res, stateListDrawable, palette);
+
+        return new RippleDrawable(rippleColor, stateListDrawable, null);
+    }
+
+    /**
+     * Generate a RippleDrawable which will be the background of a button to ensure it
+     * is the same color as the rest of the call card.
+     */
+    private RippleDrawable backgroundDrawable(MaterialPalette palette) {
+        Resources res = getResources();
+        ColorStateList rippleColor =
+                ColorStateList.valueOf(res.getColor(R.color.incall_accent_color));
+
+        StateListDrawable stateListDrawable = new StateListDrawable();
+        addFocused(res, stateListDrawable);
+        addUnselected(res, stateListDrawable, palette);
+
+        return new RippleDrawable(rippleColor, stateListDrawable, null);
+    }
+
+    // state_selected and state_focused
+    private void addSelectedAndFocused(Resources res, StateListDrawable drawable) {
+        int[] selectedAndFocused = {android.R.attr.state_selected, android.R.attr.state_focused};
+        Drawable selectedAndFocusedDrawable = res.getDrawable(R.drawable.btn_selected_focused);
+        drawable.addState(selectedAndFocused, selectedAndFocusedDrawable);
+    }
+
+    // state_focused
+    private void addFocused(Resources res, StateListDrawable drawable) {
+        int[] focused = {android.R.attr.state_focused};
+        Drawable focusedDrawable = res.getDrawable(R.drawable.btn_unselected_focused);
+        drawable.addState(focused, focusedDrawable);
+    }
+
+    // state_selected
+    private void addSelected(Resources res, StateListDrawable drawable, MaterialPalette palette) {
+        int[] selected = {android.R.attr.state_selected};
+        LayerDrawable selectedDrawable = (LayerDrawable) res.getDrawable(R.drawable.btn_selected);
+        ((GradientDrawable) selectedDrawable.getDrawable(0)).setColor(palette.mSecondaryColor);
+        drawable.addState(selected, selectedDrawable);
+    }
+
+    // default
+    private void addUnselected(Resources res, StateListDrawable drawable, MaterialPalette palette) {
+        LayerDrawable unselectedDrawable =
+                (LayerDrawable) res.getDrawable(R.drawable.btn_unselected);
+        ((GradientDrawable) unselectedDrawable.getDrawable(0)).setColor(palette.mPrimaryColor);
+        drawable.addState(new int[0], unselectedDrawable);
     }
 
     @Override
@@ -234,14 +375,13 @@ public class CallButtonFragment
         mOverflowButton.setEnabled(isEnabled);
         mAddParticipantButton.setEnabled(isEnabled);
         mManageVideoCallConferenceButton.setEnabled(isEnabled);
+        mMoreMenuButton.setEnabled(isEnabled);
     }
 
     @Override
     public void setMute(boolean value) {
         if (mMuteButton.isSelected() != value) {
             mMuteButton.setSelected(value);
-            maybeSendAccessibilityEvent(mMuteButton, value ? R.string.accessibility_call_muted
-                    : R.string.accessibility_call_unmuted);
         }
     }
 
@@ -269,9 +409,6 @@ public class CallButtonFragment
     public void setHold(boolean value) {
         if (mHoldButton.isSelected() != value) {
             mHoldButton.setSelected(value);
-            maybeSendAccessibilityEvent(mHoldButton,
-                    value ? R.string.accessibility_call_put_on_hold :
-                            R.string.accessibility_call_removed_from_hold);
         }
     }
 
@@ -293,6 +430,11 @@ public class CallButtonFragment
     @Override
     public void showChangeToVideoButton(boolean show) {
         mChangeToVideoButton.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    @Override
+    public void enableChangeToVideoButton(boolean enable) {
+        mChangeToVideoButton.setEnabled(enable);
     }
 
     @Override
@@ -471,7 +613,7 @@ public class CallButtonFragment
             });
         }
 
-        final Menu menu = mOverflowPopup.getMenu();
+        Menu menu = mOverflowPopup.getMenu();
         menu.findItem(R.id.overflow_merge_menu_item).setVisible(showMergeMenuOption);
         menu.findItem(R.id.overflow_add_menu_item).setVisible(showAddMenuOption);
         menu.findItem(R.id.overflow_hold_menu_item).setVisible(
@@ -483,6 +625,11 @@ public class CallButtonFragment
         menu.findItem(R.id.overflow_manage_conference_menu_item).setVisible(
             showManageConferenceVideoCallOption);
 
+        if (mMoreMenu != null) {
+            menu = mMoreMenu.getMenu();
+            menu.findItem(R.id.menu_start_record).setVisible(true);
+        }
+
         mOverflowButton.setEnabled(menu.hasVisibleItems());
     }
 
@@ -492,26 +639,7 @@ public class CallButtonFragment
         refreshAudioModePopup();
 
         if (mPrevAudioMode != mode) {
-            if (mPrevAudioMode != 0) {
-                int stringId = 0;
-                switch (mode) {
-                    case AudioState.ROUTE_EARPIECE:
-                        stringId = R.string.accessibility_earpiece_selected;
-                        break;
-                    case AudioState.ROUTE_BLUETOOTH:
-                        stringId = R.string.accessibility_bluetooth_headset_selected;
-                        break;
-                    case AudioState.ROUTE_WIRED_HEADSET:
-                        stringId = R.string.accessibility_wired_headset_selected;
-                        break;
-                    case AudioState.ROUTE_SPEAKER:
-                        stringId = R.string.accessibility_speakerphone_selected;
-                        break;
-                }
-                if (stringId != 0) {
-                    maybeSendAccessibilityEvent(mAudioButton, stringId);
-                }
-            }
+            updateAudioButtonContentDescription(mode);
             mPrevAudioMode = mode;
         }
     }
@@ -543,6 +671,17 @@ public class CallButtonFragment
             case R.id.audio_mode_bluetooth:
                 mode = AudioState.ROUTE_BLUETOOTH;
                 break;
+
+            case R.id.menu_start_record:
+                ((InCallActivity)getActivity()).startInCallRecorder();
+
+                return true;
+
+            case R.id.menu_stop_record:
+                ((InCallActivity)getActivity()).stopInCallRecorder();
+
+                return true;
+
             default:
                 Log.e(this, "onMenuItemClick:  unexpected View ID " + item.getItemId()
                         + " (MenuItem = '" + item + "')");
@@ -562,6 +701,7 @@ public class CallButtonFragment
     public void onDismiss(PopupMenu menu) {
         Log.d(this, "- onDismiss: " + menu);
         mAudioModePopupVisible = false;
+        updateAudioButtons(getPresenter().getSupportedAudio());
     }
 
     /**
@@ -583,7 +723,7 @@ public class CallButtonFragment
         Log.d(this, "onManageVideoCallConferenceClicked");
         final InCallActivity activity = (InCallActivity) getActivity();
         if (activity != null) {
-            activity.showConferenceCallManager();
+            activity.showConferenceCallManager(true);
         }
     }
 
@@ -627,10 +767,8 @@ public class CallButtonFragment
             Log.d(this, "updateAudioButtons - popup menu mode");
 
             audioButtonEnabled = true;
+            audioButtonChecked = true;
             showMoreIndicator = true;
-            // The audio button is NOT a toggle in this state.  (And its
-            // setChecked() state is irrelevant since we completely hide the
-            // btn_compound_background layer anyway.)
 
             // Update desired layers:
             if (isAudio(AudioState.ROUTE_BLUETOOTH)) {
@@ -644,6 +782,9 @@ public class CallButtonFragment
                 // sort of "wired headset" icon here instead of the "handset
                 // earpiece" icon.  (Still need an asset for that, though.)
             }
+
+            // The audio button is NOT a toggle in this state, so set selected to false.
+            mAudioButton.setSelected(false);
         } else if (speakerSupported) {
             Log.d(this, "updateAudioButtons - speaker toggle mode");
 
@@ -652,6 +793,7 @@ public class CallButtonFragment
             // The audio button *is* a toggle in this state, and indicated the
             // current state of the speakerphone.
             audioButtonChecked = isAudio(AudioState.ROUTE_SPEAKER);
+            mAudioButton.setSelected(audioButtonChecked);
 
             // update desired layers:
             showToggleIndicator = true;
@@ -663,6 +805,7 @@ public class CallButtonFragment
             // irrelevant since it's always disabled and unchecked.
             audioButtonEnabled = false;
             audioButtonChecked = false;
+            mAudioButton.setSelected(false);
 
             // update desired layers:
             showToggleIndicator = true;
@@ -680,7 +823,7 @@ public class CallButtonFragment
 
         // Only enable the audio button if the fragment is enabled.
         mAudioButton.setEnabled(audioButtonEnabled && mIsEnabled);
-        mAudioButton.setSelected(audioButtonChecked);
+        mAudioButton.setChecked(audioButtonChecked);
 
         final LayerDrawable layers = (LayerDrawable) mAudioButton.getBackground();
         Log.d(this, "'layers' drawable: " + layers);
@@ -700,6 +843,38 @@ public class CallButtonFragment
         layers.findDrawableByLayerId(R.id.speakerphoneItem)
                 .setAlpha(showSpeakerphoneIcon ? VISIBLE : HIDDEN);
 
+    }
+
+    /**
+     * Update the content description of the audio button.
+     */
+    private void updateAudioButtonContentDescription(int mode) {
+        int stringId = 0;
+
+        // If bluetooth is not supported, the audio buttion will toggle, so use the label "speaker".
+        // Otherwise, use the label of the currently selected audio mode.
+        if (!isSupported(AudioState.ROUTE_BLUETOOTH)) {
+            stringId = R.string.audio_mode_speaker;
+        } else {
+            switch (mode) {
+                case AudioState.ROUTE_EARPIECE:
+                    stringId = R.string.audio_mode_earpiece;
+                    break;
+                case AudioState.ROUTE_BLUETOOTH:
+                    stringId = R.string.audio_mode_bluetooth;
+                    break;
+                case AudioState.ROUTE_WIRED_HEADSET:
+                    stringId = R.string.audio_mode_wired_headset;
+                    break;
+                case AudioState.ROUTE_SPEAKER:
+                    stringId = R.string.audio_mode_speaker;
+                    break;
+            }
+        }
+
+        if (stringId != 0) {
+            mAudioButton.setContentDescription(getResources().getString(stringId));
+        }
     }
 
     private void showAudioModePopup() {
@@ -781,25 +956,37 @@ public class CallButtonFragment
         return getActivity();
     }
 
-    private void maybeSendAccessibilityEvent(View view, int stringId) {
-        final Context context = getActivity();
-        AccessibilityManager manager =
-                (AccessibilityManager) context.getSystemService(Context.ACCESSIBILITY_SERVICE);
-        if (manager != null && manager.isEnabled()) {
-            AccessibilityEvent e = AccessibilityEvent.obtain();
-            e.setSource(view);
-            e.setEventType(AccessibilityEvent.TYPE_ANNOUNCEMENT);
-            e.setClassName(getClass().getName());
-            e.setPackageName(context.getPackageName());
-            e.getText().add(context.getResources().getString(stringId));
-            manager.sendAccessibilityEvent(e);
-        }
-    }
-
     private boolean isTtyModeEnabled() {
         return (android.provider.Settings.Secure.getInt(
                 getContext().getContentResolver(),
                 android.provider.Settings.Secure.PREFERRED_TTY_MODE,
                 TelecomManager.TTY_MODE_OFF) != TelecomManager.TTY_MODE_OFF);
+    }
+
+    private class MorePopupMenu extends PopupMenu {
+        public MorePopupMenu(Context context, View anchor) {
+            super(context, anchor);
+        }
+
+        @Override
+        public void show() {
+            final Menu menu = getMenu();
+            final MenuItem startRecord = menu.findItem(R.id.menu_start_record);
+            final MenuItem stopRecord = menu.findItem(R.id.menu_stop_record);
+
+            boolean isRecording = ((InCallActivity)getActivity()).isCallRecording();
+            boolean isRecordEnabled = ((InCallActivity)getActivity()).isCallRecorderEnabled();
+
+            boolean startEnabled = !isRecording && isRecordEnabled;
+            boolean stopEnabled = isRecording && isRecordEnabled;
+
+            startRecord.setVisible(startEnabled);
+            startRecord.setEnabled(startEnabled);
+
+            stopRecord.setVisible(stopEnabled);
+            stopRecord.setEnabled(stopEnabled);
+
+            super.show();
+        }
     }
 }

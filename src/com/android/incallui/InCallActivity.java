@@ -31,13 +31,14 @@ import android.content.DialogInterface.OnCancelListener;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Configuration;
+import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.graphics.Point;
 import android.net.Uri;
 import android.os.Bundle;
 import android.telecom.DisconnectCause;
-import android.telecom.PhoneAccount;
 import android.telecom.PhoneAccountHandle;
+import android.telecom.TelecomManager;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
@@ -55,6 +56,10 @@ import android.widget.TextView;
 import com.android.phone.common.animation.AnimUtils;
 import com.android.phone.common.animation.AnimationListenerAdapter;
 import com.android.contacts.common.interactions.TouchPointManager;
+import com.android.contacts.common.util.MaterialColorMapUtils;
+import com.android.contacts.common.util.MaterialColorMapUtils.MaterialPalette;
+import com.android.contacts.common.widget.SelectPhoneAccountDialogFragment;
+import com.android.contacts.common.widget.SelectPhoneAccountDialogFragment.SelectPhoneAccountListener;
 import com.android.incallui.Call.State;
 
 import java.util.ArrayList;
@@ -68,9 +73,21 @@ public class InCallActivity extends Activity {
 
     public static final String SHOW_DIALPAD_EXTRA = "InCallActivity.show_dialpad";
     public static final String DIALPAD_TEXT_EXTRA = "InCallActivity.dialpad_text";
-    public static final String NEW_OUTGOING_CALL = "InCallActivity.new_outgoing_call";
     private static final String ACTION_SUPP_SERVICE_FAILURE =
             "org.codeaurora.ACTION_SUPP_SERVICE_FAILURE";
+
+    private static final Uri URI_PHONE_FEATURE = Uri
+            .parse("content://com.qualcomm.qti.phonefeature.FEATURE_PROVIDER");
+
+    private static final String METHOD_START_CALL_RECORD = "start_call_record";
+    private static final String METHOD_STOP_CALL_RECORD = "stop_call_record";
+    private static final String METHOD_IS_CALL_RECORD_RUNNING = "is_call_record_running";
+    private static final String METHOD_IS_CALL_RECORD_AVAILABLE = "is_call_record_available";
+    private static final String METHOD_GET_CALL_RECORD_DURATION = "get_call_record_duration";
+    private static final String EXTRA_RESULT = "result";
+    public static final String NEW_OUTGOING_CALL_EXTRA = "InCallActivity.new_outgoing_call";
+    public static final String SHOW_CIRCULAR_REVEAL_EXTRA = "InCallActivity.show_circular_reveal";
+
     private CallButtonFragment mCallButtonFragment;
     private CallCardFragment mCallCardFragment;
     private AnswerFragment mAnswerFragment;
@@ -105,6 +122,7 @@ public class InCallActivity extends Activity {
 
     private Tab[] mDsdaTab = new Tab[TAB_COUNT_TWO];
     private boolean[] mDsdaTabAdd = {false, false};
+    private boolean mDismissKeyguard = false;
 
     AnimationListenerAdapter mSlideOutListener = new AnimationListenerAdapter() {
         @Override
@@ -211,6 +229,7 @@ public class InCallActivity extends Activity {
         if (mDialpadFragment != null) {
             out.putString(DIALPAD_TEXT_EXTRA, mDialpadFragment.getDtmfText());
         }
+        super.onSaveInstanceState(out);
     }
 
     @Override
@@ -233,6 +252,8 @@ public class InCallActivity extends Activity {
         super.onResume();
 
         mIsForegroundActivity = true;
+
+        InCallPresenter.getInstance().setThemeColors();
         InCallPresenter.getInstance().onUiShowing(true);
 
         if (mShowDialpadRequested) {
@@ -266,6 +287,9 @@ public class InCallActivity extends Activity {
         }
 
         InCallPresenter.getInstance().onUiShowing(false);
+        if (isFinishing()) {
+            InCallPresenter.getInstance().unsetActivity(this);
+        }
     }
 
     @Override
@@ -280,10 +304,8 @@ public class InCallActivity extends Activity {
     @Override
     protected void onDestroy() {
         Log.d(this, "onDestroy()...  this = " + this);
-
-        InCallPresenter.getInstance().updateIsChangingConfigurations();
-        InCallPresenter.getInstance().setActivity(null);
         unregisterReceiver(mReceiver);
+        InCallPresenter.getInstance().unsetActivity(this);
         super.onDestroy();
     }
 
@@ -346,12 +368,12 @@ public class InCallActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        Log.d(this, "onBackPressed()...");
+        Log.i(this, "onBackPressed");
 
         // BACK is also used to exit out of any "special modes" of the
         // in-call UI:
 
-        if (!mCallCardFragment.isVisible()) {
+        if (!mConferenceManagerFragment.isVisible() && !mCallCardFragment.isVisible()) {
             return;
         }
 
@@ -360,7 +382,7 @@ public class InCallActivity extends Activity {
             mCallButtonFragment.getPresenter().showDialpadClicked(false);
             return;
         } else if (mConferenceManagerFragment.isVisible()) {
-            mConferenceManagerFragment.setVisible(false);
+            showConferenceCallManager(false);
             return;
         }
 
@@ -526,8 +548,8 @@ public class InCallActivity extends Activity {
                 relaunchedFromDialer(showDialpad);
             }
 
-            if (intent.getBooleanExtra(NEW_OUTGOING_CALL, false)) {
-                intent.removeExtra(NEW_OUTGOING_CALL);
+            if (intent.getBooleanExtra(NEW_OUTGOING_CALL_EXTRA, false)) {
+                intent.removeExtra(NEW_OUTGOING_CALL_EXTRA);
                 Call call = CallList.getInstance().getOutgoingCall();
                 if (call == null) {
                     call = CallList.getInstance().getPendingOutgoingCall();
@@ -542,7 +564,6 @@ public class InCallActivity extends Activity {
                     extras = new Bundle();
                 }
 
-
                 Point touchPoint = null;
                 if (TouchPointManager.getInstance().hasValidPoint()) {
                     // Use the most immediate touch point in the InCallUi if available
@@ -553,23 +574,21 @@ public class InCallActivity extends Activity {
                         touchPoint = (Point) extras.getParcelable(TouchPointManager.TOUCH_POINT);
                     }
                 }
-                mCallCardFragment.animateForNewOutgoingCall(touchPoint);
 
-                /*
-                 * If both a phone account handle and a list of phone accounts to choose from are
-                 * missing, then disconnect the call because there is no way to place an outgoing
-                 * call.
-                 * The exception is emergency calls, which may be waiting for the ConnectionService
-                 * to set the PhoneAccount during the PENDING_OUTGOING state.
-                 */
-                if (call != null && !isEmergencyCall(call)) {
-                    final List<PhoneAccountHandle> phoneAccountHandles = extras
-                            .getParcelableArrayList(android.telecom.Call.AVAILABLE_PHONE_ACCOUNTS);
-                    if (call.getAccountHandle() == null &&
-                            (phoneAccountHandles == null || phoneAccountHandles.isEmpty())) {
-                        TelecomAdapter.getInstance().disconnectCall(call.getId());
-                    }
+                // This is only true in the case where an outgoing call is initiated by tapping
+                // on the "Select account dialog", in which case we skip the initial animation. In
+                // most other cases the circular reveal is done by OutgoingCallAnimationActivity.
+                final boolean showCircularReveal =
+                        intent.getBooleanExtra(SHOW_CIRCULAR_REVEAL_EXTRA, false);
+                mCallCardFragment.animateForNewOutgoingCall(touchPoint, showCircularReveal);
+
+                // InCallActivity is responsible for disconnecting a new outgoing call if there
+                // is no way of making it (i.e. no valid call capable accounts)
+                if (InCallPresenter.isCallWithNoValidAccounts(call)) {
+                    TelecomAdapter.getInstance().disconnectCall(call.getId());
                 }
+
+                dismissKeyguard(true);
             }
 
             Call pendingAccountSelectionCall = CallList.getInstance().getWaitingForAccountCall();
@@ -586,22 +605,28 @@ public class InCallActivity extends Activity {
                     phoneAccountHandles = new ArrayList<>();
                 }
 
+                SelectPhoneAccountListener listener = new SelectPhoneAccountListener() {
+                    @Override
+                    public void onPhoneAccountSelected(PhoneAccountHandle selectedAccountHandle,
+                            boolean setDefault) {
+                        InCallPresenter.getInstance().handleAccountSelection(selectedAccountHandle,
+                                setDefault);
+                    }
+                    @Override
+                    public void onDialogDismissed() {
+                        InCallPresenter.getInstance().cancelAccountSelection();
+                    }
+                };
+
                 SelectPhoneAccountDialogFragment.showAccountDialog(getFragmentManager(),
-                        phoneAccountHandles);
+                        R.string.select_phone_account_for_calls, true, phoneAccountHandles,
+                        listener);
             } else {
                 mCallCardFragment.setVisible(true);
             }
 
             return;
         }
-    }
-
-    private boolean isEmergencyCall(Call call) {
-        final Uri handle = call.getHandle();
-        if (handle == null) {
-            return false;
-        }
-        return PhoneNumberUtils.isEmergencyNumber(handle.getSchemeSpecificPart());
     }
 
     private void relaunchedFromDialer(boolean showDialpad) {
@@ -653,6 +678,10 @@ public class InCallActivity extends Activity {
     }
 
     public void dismissKeyguard(boolean dismiss) {
+        if (mDismissKeyguard == dismiss) {
+            return;
+        }
+        mDismissKeyguard = dismiss;
         if (dismiss) {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD);
         } else {
@@ -707,8 +736,18 @@ public class InCallActivity extends Activity {
         return mDialpadFragment != null && mDialpadFragment.isVisible();
     }
 
-    public void showConferenceCallManager() {
-        mConferenceManagerFragment.setVisible(true);
+    /**
+     * Hides or shows the conference manager fragment.
+     *
+     * @param show {@code true} if the conference manager should be shown, {@code false} if it
+     *                         should be hidden.
+     */
+    public void showConferenceCallManager(boolean show) {
+        mConferenceManagerFragment.setVisible(show);
+
+        // Need to hide the call card fragment to ensure that accessibility service does not try to
+        // give focus to the call card when the conference manager is visible.
+        mCallCardFragment.getView().setVisibility(show ? View.GONE : View.VISIBLE);
     }
 
     public void showPostCharWaitDialog(String callId, String chars) {
@@ -734,12 +773,22 @@ public class InCallActivity extends Activity {
         return super.dispatchPopulateAccessibilityEvent(event);
     }
 
-    public void maybeShowErrorDialogOnDisconnect(DisconnectCause disconnectCause) {
+    public void maybeShowErrorDialogOnDisconnect(Call call) {
         Log.d(this, "maybeShowErrorDialogOnDisconnect");
 
-        if (!isFinishing() && !TextUtils.isEmpty(disconnectCause.getDescription())
-                && (disconnectCause.getCode() == DisconnectCause.ERROR ||
-                        disconnectCause.getCode() == DisconnectCause.RESTRICTED)) {
+        if (isFinishing()) {
+            return;
+        }
+
+        DisconnectCause disconnectCause = call.getDisconnectCause();
+        int code = disconnectCause.getCode();
+
+        if (call.wasUnansweredForwarded()) {
+            showErrorDialog(getString(R.string.callUnanswered_forwarded));
+        } else if (call.missedBecauseIncomingCallsBarredRemotely()) {
+            showErrorDialog(getString(R.string.callFailed_incoming_cb_enabled));
+        } else if (!TextUtils.isEmpty(disconnectCause.getDescription())
+                && (code == DisconnectCause.ERROR || code == DisconnectCause.RESTRICTED)) {
             showErrorDialog(disconnectCause.getDescription());
         }
     }
@@ -819,7 +868,7 @@ public class InCallActivity extends Activity {
 
         mDialog = new AlertDialog.Builder(this)
                 .setMessage(msg)
-                .setPositiveButton(R.string.ok, new OnClickListener() {
+                .setPositiveButton(android.R.string.ok, new OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         onDialogDismissed();
@@ -963,5 +1012,56 @@ public class InCallActivity extends Activity {
                 onSuppServiceFailed(service);
             }
         }
+    }
+
+    public Bundle callBinder(String method) {
+        if (getContentResolver().acquireProvider(URI_PHONE_FEATURE) == null) {
+            // Check whether phone feature enabled
+            return null;
+        }
+
+        return getContentResolver().call(URI_PHONE_FEATURE, method, null, null);
+    }
+
+    public boolean isCallRecording() {
+        boolean isRecording = false;
+        Bundle result = callBinder(METHOD_IS_CALL_RECORD_RUNNING);
+
+        if (result != null) {
+            isRecording = result.getBoolean(EXTRA_RESULT);
+        }
+
+        return isRecording;
+    }
+
+    public boolean isCallRecorderEnabled() {
+        boolean isCallRecorderEnabled = false;
+        Bundle result = callBinder(METHOD_IS_CALL_RECORD_AVAILABLE);
+
+        if (result != null) {
+            isCallRecorderEnabled = result.getBoolean(EXTRA_RESULT);
+        }
+        return isCallRecorderEnabled;
+    }
+
+    public void startInCallRecorder() {
+        callBinder(METHOD_START_CALL_RECORD);
+    }
+
+    public void stopInCallRecorder() {
+        callBinder(METHOD_STOP_CALL_RECORD);
+    }
+
+    public String getCallRecordingTime() {
+        long time = 0;
+        Bundle result = callBinder(METHOD_GET_CALL_RECORD_DURATION);
+
+        if (result != null) {
+            time = result.getLong(EXTRA_RESULT) / 1000;
+        }
+
+        String recordingTime = String.format("%02d:%02d", time / 60, time % 60);
+
+        return recordingTime;
     }
 }

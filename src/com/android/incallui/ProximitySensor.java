@@ -19,6 +19,7 @@ package com.android.incallui;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.os.PowerManager;
+import android.provider.Settings;
 import android.telecom.AudioState;
 
 import com.android.incallui.AudioModeProvider.AudioModeListener;
@@ -35,23 +36,28 @@ import com.google.common.base.Objects;
  * sensor should be enabled and disabled. Most of that state is fed into this class through
  * public methods.
  */
-public class ProximitySensor implements AccelerometerListener.OrientationListener,
+public class ProximitySensor implements AccelerometerListener.ChangeListener,
         InCallStateListener, AudioModeListener {
     private static final String TAG = ProximitySensor.class.getSimpleName();
+
+    private static final String PROXIMITY_SENSOR = "proximity_sensor";
 
     private final PowerManager mPowerManager;
     private final AudioModeProvider mAudioModeProvider;
     private final AccelerometerListener mAccelerometerListener;
     private int mOrientation = AccelerometerListener.ORIENTATION_UNKNOWN;
     private boolean mUiShowing = false;
+    private boolean mHasIncomingCall = false;
     private boolean mIsPhoneOffhook = false;
     private boolean mDialpadVisible;
+    private Context mContext;
 
     // True if the keyboard is currently *not* hidden
     // Gets updated whenever there is a Configuration change
     private boolean mIsHardKeyboardOpen;
 
     public ProximitySensor(Context context, AudioModeProvider audioModeProvider) {
+        mContext = context;
         mPowerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         mAccelerometerListener = new AccelerometerListener(context, this);
         mAudioModeProvider = audioModeProvider;
@@ -70,9 +76,14 @@ public class ProximitySensor implements AccelerometerListener.OrientationListene
      * Called to identify when the device is laid down flat.
      */
     @Override
-    public void orientationChanged(int orientation) {
+    public void onOrientationChanged(int orientation) {
         mOrientation = orientation;
         updateProximitySensorMode();
+    }
+
+    @Override
+    public void onDeviceFlipped(boolean faceDown) {
+        // ignored
     }
 
     /**
@@ -85,6 +96,7 @@ public class ProximitySensor implements AccelerometerListener.OrientationListene
         // can also put the in-call screen in the INCALL state.
         boolean hasOngoingCall = InCallState.INCALL == newState && callList.hasLiveCall();
         boolean isOffhook = (InCallState.OUTGOING == newState) || hasOngoingCall;
+        mHasIncomingCall = (InCallState.INCOMING == newState);
 
         if (isOffhook != mIsPhoneOffhook) {
             mIsPhoneOffhook = isOffhook;
@@ -92,6 +104,10 @@ public class ProximitySensor implements AccelerometerListener.OrientationListene
             mOrientation = AccelerometerListener.ORIENTATION_UNKNOWN;
             mAccelerometerListener.enable(mIsPhoneOffhook);
 
+            updateProximitySensorMode();
+        }
+
+        if (mHasIncomingCall) {
             updateProximitySensorMode();
         }
     }
@@ -181,6 +197,8 @@ public class ProximitySensor implements AccelerometerListener.OrientationListene
                     || AudioState.ROUTE_SPEAKER == audioMode
                     || AudioState.ROUTE_BLUETOOTH == audioMode
                     || mIsHardKeyboardOpen);
+            screenOnImmediately |= Settings.System.getInt(mContext.getContentResolver(),
+                    PROXIMITY_SENSOR, 1) == 0;
 
             // We do not keep the screen off when the user is outside in-call screen and we are
             // horizontal, but we do not force it on when we become horizontal until the
@@ -206,15 +224,15 @@ public class ProximitySensor implements AccelerometerListener.OrientationListene
                     .add("aud", AudioState.audioRouteToString(audioMode))
                     .toString());
 
-            if (mIsPhoneOffhook && !screenOnImmediately) {
+            if ((mIsPhoneOffhook || mHasIncomingCall) && !screenOnImmediately) {
                 Log.d(this, "Turning on proximity sensor");
                 // Phone is in use!  Arrange for the screen to turn off
                 // automatically when the sensor detects a close object.
                 TelecomAdapter.getInstance().turnOnProximitySensor();
             } else {
                 Log.d(this, "Turning off proximity sensor");
-                // Phone is either idle, or ringing.  We don't want any special proximity sensor
-                // behavior in either case.
+                // Phone is idle.  We don't want any special proximity sensor
+                // behavior in this case.
                 TelecomAdapter.getInstance().turnOffProximitySensor(screenOnImmediately);
             }
         }
